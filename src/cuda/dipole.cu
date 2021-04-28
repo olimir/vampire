@@ -22,6 +22,7 @@
 
 // Conditional compilation of all cuda code
 #ifdef CUDA
+//#include <cub/cub.cuh>
 
 // namespace aliasing for brevity
 namespace cu = vcuda::internal;
@@ -56,8 +57,10 @@ void update_dipolar_fields ()
    /*
     * Update cell dipolar fields
     */
-
-   update_dipolar_fields <<< cu::grid_size, cu::block_size >>> (
+   int _block_size = 1024;
+   int _grid_size = (::cells::num_cells + _block_size - 1) / _block_size;
+   //update_dipolar_fields <<< dim3(num_local_cells, cu::grid_size), dim3(1, cu::block_size) >>> (
+   update_dipolar_fields <<< dim3(::cells::num_local_cells, _grid_size), dim3(1, _block_size) >>> (
          cu::cells::d_x_mag, cu::cells::d_y_mag, cu::cells::d_z_mag,
          cu::cells::d_x_coord, cu::cells::d_y_coord, cu::cells::d_z_coord,
          cu::cells::d_volume,
@@ -185,6 +188,38 @@ __global__ void update_cell_magnetization (
    }
 }
 
+__inline__ __device__ cu_real_t warp_reduce_add(cu::cu_real_t a)
+{
+   for (int offset = warpSize / 2; offset > 0; offset /= 2)
+      a += __shfl_down_sync(__activemask(), a, offset);
+   return a;
+}
+
+
+__inline__ __device__ int block_reduce_add(cu_real_t field_val)
+{
+   // shared memory storage for up to 32 partial sums;
+   // max. supported block_size==1024
+   static __shared__ cu_real_t shared_buf[32];
+
+   int lane_idx = threadIdx.x % warpSize;
+   int warp_idx = threadIdx.x / warpSize;
+
+   field_val = warp_reduce_add(field_val);     // partial reduction of each warp
+
+   if (lane_idx == 0) shared_buf[warp_idx] = field_val; // sum stored in shared memory
+
+   __syncthreads();              // Wait for all partial reductions
+
+   //read existing partial sums from shared memory, otherwise set to zero
+   field_val = (threadIdx.x < blockDim.x / warpSize) ? shared_buf[lane_idx] : 0;
+
+   //final reduction across the partial sums
+   if (warp_idx == 0) field_val = warp_reduce_add(field_val);
+
+  return field_val;
+}
+
 // Same as above - some data is read only, although looks like it's
 // at least accessed in contoguous manner
 __global__ void update_dipolar_fields (
@@ -204,33 +239,35 @@ __global__ void update_dipolar_fields (
    const cu_real_t imuB = 1.0/9.27400915e-24;
    const cu_real_t prefactor = 9.27400915e-01;     // prefactor = mu_B * (mu_0/(4*pi) /1e-30)
 
-   for ( int lc = blockIdx.x * blockDim.x + threadIdx.x;
-         lc < n_local_cells;
-         lc += blockDim.x * gridDim.x)
+   int lc = blockIdx.x;//local cell index
+
+   if (lc < n_local_cells)
    {
 
       int i = d_cell_id_array[lc]; //::cells::cell_id_array[lc];
+
       const cu_real_t self_demag = 8.0 * M_PI / (3.0 * volume[i]);
 
-//         // Normalise cells magnetisation
-//         cu_real_t mx_i = x_mag[i] * imuB;
-//         cu_real_t my_i = y_mag[i] * imuB;
-//         cu_real_t mz_i = z_mag[i] * imuB;
+//      // Normalise cells magnetisation
+//      cu_real_t mx_i = x_mag[i] * imuB;
+//      cu_real_t my_i = y_mag[i] * imuB;
+//      cu_real_t mz_i = z_mag[i] * imuB;
 
       // Initialise field for cell i 
       cu_real_t field_x = 0.0;
       cu_real_t field_y = 0.0;
       cu_real_t field_z = 0.0;
 
-//    // Add self-demagnetisation term
-//       cu_real_t mu0Hd_field_x = -0.5 * self_demag * mx_i;
-//       cu_real_t mu0Hd_field_y = -0.5 * self_demag * my_i;
-//       cu_real_t mu0Hd_field_z = -0.5 * self_demag * mz_i;
+//      // Add self-demagnetisation term
+//      cu_real_t mu0Hd_field_x = -0.5 * self_demag * mx_i;
+//      cu_real_t mu0Hd_field_y = -0.5 * self_demag * my_i;
+//      cu_real_t mu0Hd_field_z = -0.5 * self_demag * mz_i;
 
-
-      for ( int j = 0; j < n_cells; j ++){
-
-         const int k = lc * n_cells + j; 
+      for ( int j = blockIdx.y * blockDim.y + threadIdx.y;
+           j < n_cells;
+           j += blockDim.y * gridDim.y)
+      {
+         const int k = lc * n_cells + j;
 
          cu_real_t mx_j = x_mag[j] * imuB;
          cu_real_t my_j = y_mag[j] * imuB;
@@ -239,19 +276,60 @@ __global__ void update_dipolar_fields (
          field_x += (mx_j * d_tensor_xx[k] + my_j * d_tensor_xy[k] + mz_j * d_tensor_xz[k]);
          field_y += (mx_j * d_tensor_xy[k] + my_j * d_tensor_yy[k] + mz_j * d_tensor_yz[k]);
          field_z += (mx_j * d_tensor_xz[k] + my_j * d_tensor_yz[k] + mz_j * d_tensor_zz[k]);
-
       } // end for loop over n_cells
 
-      // Update cells dipolar field
-      x_cell_field[i] = prefactor * field_x;
-      y_cell_field[i] = prefactor * field_y;
-      z_cell_field[i] = prefactor * field_z;
+      //reduction across the whole thread-block
+      // Same AoS argument as above?
+      field_x = block_reduce_add(field_x);
+      if (threadIdx.y == 0)
+      {
+         // Update cells dipolar field
+         x_cell_field[i] = prefactor * field_x;
+         // Add self-demagnetisation term for mu0Hd
+         x_cell_mu0H_field[i] = prefactor * (field_x + (-0.5 * self_demag * x_mag[i] * imuB));
+      }
 
-      // Add self-demagnetisation term for mu0Hd
-      x_cell_mu0H_field[i] = prefactor * (field_x + (-0.5 * self_demag * x_mag[i] * imuB));
-      y_cell_mu0H_field[i] = prefactor * (field_y + (-0.5 * self_demag * y_mag[i] * imuB));
-      z_cell_mu0H_field[i] = prefactor * (field_z + (-0.5 * self_demag * z_mag[i] * imuB));
-   } // end for loop over n_local_cells
+      field_y = block_reduce_add(field_y);
+      if (threadIdx.y == 0)
+      {
+         y_cell_field[i] = prefactor * field_y;
+         y_cell_mu0H_field[i] = prefactor * (field_y + (-0.5 * self_demag * y_mag[i] * imuB));
+      }
+
+      field_z = block_reduce_add(field_z);
+      if (threadIdx.y == 0)
+      {
+         z_cell_field[i] = prefactor * field_z;
+         z_cell_mu0H_field[i] = prefactor * (field_z + (-0.5 * self_demag * z_mag[i] * imuB));
+      }
+/*
+      typedef cub::BlockReduce<cu_real_t, 1, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY, 1024> BlockReduce;
+      __shared__ typename BlockReduce::TempStorage temp_storage;
+      const cu_real_t sum_x = BlockReduce(temp_storage).Sum(field_x);
+      __syncthreads();
+      if (threadIdx.y == 0)
+      {
+         x_cell_field[i] = prefactor * sum_x;
+         x_cell_mu0H_field[i] = prefactor * (sum_x + (-0.5 * self_demag * x_mag[i] * imuB));
+      }
+
+      const cu_real_t sum_y = BlockReduce(temp_storage).Sum(field_y);
+      __syncthreads();
+      if (threadIdx.y == 0)
+      {
+         y_cell_field[i] = prefactor * sum_y;
+         y_cell_mu0H_field[i] = prefactor * (sum_y + (-0.5 * self_demag * y_mag[i] * imuB));
+      }
+
+      const cu_real_t sum_z = BlockReduce(temp_storage).Sum(field_z);
+      __syncthreads();
+      if (threadIdx.y == 0)
+      {
+         z_cell_field[i] = prefactor * sum_z;
+         z_cell_mu0H_field[i] = prefactor * (sum_z + (-0.5 * self_demag * z_mag[i] * imuB));
+      }
+*/
+   } // end lc < n_local_cells
 }
 
 __global__ void update_atomistic_dipolar_fields (
