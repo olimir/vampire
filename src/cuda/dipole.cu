@@ -72,9 +72,8 @@ void update_dipolar_fields ()
     * Update cell dipolar fields
     */
    int constexpr _block_size = 1024;
-   int _grid_size = (::cells::num_cells + _block_size - 1) / _block_size;
    //update_dipolar_fields <cu::block_size> <<< dim3(::cells::num_local_cells, cu::grid_size), dim3(1, cu::block_size) >>> (
-   update_dipolar_fields <_block_size> <<< dim3(::cells::num_local_cells, _grid_size), dim3(1, _block_size) >>> (
+   update_dipolar_fields <_block_size> <<< dim3(::cells::num_local_cells), dim3(_block_size) >>> (
          cu::cells::d_x_mag, cu::cells::d_y_mag, cu::cells::d_z_mag,
          cu::cells::d_x_coord, cu::cells::d_y_coord, cu::cells::d_z_coord,
          cu::cells::d_volume,
@@ -278,9 +277,9 @@ __global__ void update_dipolar_fields (
 //      cu_real_t mu0Hd_field_y = -0.5 * self_demag * my_i;
 //      cu_real_t mu0Hd_field_z = -0.5 * self_demag * mz_i;
 
-      for ( int j = blockIdx.y * blockDim.y + threadIdx.y;
+      for ( int j = threadIdx.x;
            j < n_cells;
-           j += blockDim.y * gridDim.y)
+           j += blockDim.x)
       {
          const int k = lc * n_cells + j;
 
@@ -298,7 +297,7 @@ __global__ void update_dipolar_fields (
       //reduction across the whole thread-block
       // Same AoS argument as above?
 /*      field_x = block_reduce_add(field_x);
-      if (threadIdx.y == 0)
+      if (threadIdx.x == 0)
       {
          // Update cells dipolar field
          x_cell_field[i] = prefactor * field_x;
@@ -307,24 +306,24 @@ __global__ void update_dipolar_fields (
       }
 
       field_y = block_reduce_add(field_y);
-      if (threadIdx.y == 0)
+      if (threadIdx.x == 0)
       {
          y_cell_field[i] = prefactor * field_y;
          y_cell_mu0H_field[i] = prefactor * (field_y + (-0.5 * self_demag * y_mag[i] * imuB));
       }
 
       field_z = block_reduce_add(field_z);
-      if (threadIdx.y == 0)
+      if (threadIdx.x == 0)
       {
          z_cell_field[i] = prefactor * field_z;
          z_cell_mu0H_field[i] = prefactor * (field_z + (-0.5 * self_demag * z_mag[i] * imuB));
       }
 */
-      typedef cub::BlockReduce<cu_real_t, 1, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY, block_size_reduce> BlockReduce;
+      typedef cub::BlockReduce<cu_real_t, block_size_reduce, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY> BlockReduce;
       __shared__ typename BlockReduce::TempStorage temp_storage;
       const cu_real_t sum_x = BlockReduce(temp_storage).Sum(field_x);
       __syncthreads();
-      if (threadIdx.y == 0)
+      if (threadIdx.x == 0)
       {
          x_cell_field[i] = prefactor * sum_x;
          x_cell_mu0H_field[i] = prefactor * (sum_x + (-0.5 * self_demag * x_mag[i] * imuB));
@@ -332,7 +331,7 @@ __global__ void update_dipolar_fields (
 
       const cu_real_t sum_y = BlockReduce(temp_storage).Sum(field_y);
       __syncthreads();
-      if (threadIdx.y == 0)
+      if (threadIdx.x == 0)
       {
          y_cell_field[i] = prefactor * sum_y;
          y_cell_mu0H_field[i] = prefactor * (sum_y + (-0.5 * self_demag * y_mag[i] * imuB));
@@ -340,7 +339,7 @@ __global__ void update_dipolar_fields (
 
       const cu_real_t sum_z = BlockReduce(temp_storage).Sum(field_z);
       __syncthreads();
-      if (threadIdx.y == 0)
+      if (threadIdx.x == 0)
       {
          z_cell_field[i] = prefactor * sum_z;
          z_cell_mu0H_field[i] = prefactor * (sum_z + (-0.5 * self_demag * z_mag[i] * imuB));
