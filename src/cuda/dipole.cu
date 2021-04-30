@@ -22,7 +22,7 @@
 
 // Conditional compilation of all cuda code
 #ifdef CUDA
-//#include <cub/cub.cuh>
+#include <cub/cub.cuh>
 
 // namespace aliasing for brevity
 namespace cu = vcuda::internal;
@@ -32,6 +32,20 @@ namespace vcuda{
 
 // module internal namespace
 namespace internal{
+
+template <int block_size_reduce>
+__global__ void update_dipolar_fields (
+      cu_real_t * x_mag, cu_real_t * y_mag, cu_real_t * z_mag,
+      cu_real_t * x_coord, cu_real_t * y_coord, cu_real_t * z_coord,
+      cu_real_t * volume,
+      cu_real_t * x_cell_field, cu_real_t * y_cell_field, cu_real_t * z_cell_field,
+      cu_real_t * x_cell_mu0H_field, cu_real_t * y_cell_mu0H_field, cu_real_t * z_cell_mu0H_field,
+      cu_real_t * d_tensor_xx, cu_real_t * d_tensor_xy, cu_real_t * d_tensor_xz,
+      cu_real_t * d_tensor_yy, cu_real_t * d_tensor_yz, cu_real_t * d_tensor_zz,
+      int * d_cell_id_array,
+      int * d_num_atoms_in_cell,
+      int n_local_cells, int n_cells
+      );
 
 void update_dipolar_fields ()
 {
@@ -57,10 +71,10 @@ void update_dipolar_fields ()
    /*
     * Update cell dipolar fields
     */
-   int _block_size = 1024;
+   int constexpr _block_size = 1024;
    int _grid_size = (::cells::num_cells + _block_size - 1) / _block_size;
-   //update_dipolar_fields <<< dim3(num_local_cells, cu::grid_size), dim3(1, cu::block_size) >>> (
-   update_dipolar_fields <<< dim3(::cells::num_local_cells, _grid_size), dim3(1, _block_size) >>> (
+   //update_dipolar_fields <cu::block_size> <<< dim3(::cells::num_local_cells, cu::grid_size), dim3(1, cu::block_size) >>> (
+   update_dipolar_fields <_block_size> <<< dim3(::cells::num_local_cells, _grid_size), dim3(1, _block_size) >>> (
          cu::cells::d_x_mag, cu::cells::d_y_mag, cu::cells::d_z_mag,
          cu::cells::d_x_coord, cu::cells::d_y_coord, cu::cells::d_z_coord,
          cu::cells::d_volume,
@@ -222,6 +236,7 @@ __inline__ __device__ int block_reduce_add(cu_real_t field_val)
 
 // Same as above - some data is read only, although looks like it's
 // at least accessed in contoguous manner
+template <int block_size_reduce>
 __global__ void update_dipolar_fields (
       cu_real_t * x_mag, cu_real_t * y_mag, cu_real_t * z_mag,
       cu_real_t * x_coord, cu_real_t * y_coord, cu_real_t * z_coord,
@@ -282,7 +297,7 @@ __global__ void update_dipolar_fields (
 
       //reduction across the whole thread-block
       // Same AoS argument as above?
-      field_x = block_reduce_add(field_x);
+/*      field_x = block_reduce_add(field_x);
       if (threadIdx.y == 0)
       {
          // Update cells dipolar field
@@ -304,8 +319,8 @@ __global__ void update_dipolar_fields (
          z_cell_field[i] = prefactor * field_z;
          z_cell_mu0H_field[i] = prefactor * (field_z + (-0.5 * self_demag * z_mag[i] * imuB));
       }
-/*
-      typedef cub::BlockReduce<cu_real_t, 1, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY, 1024> BlockReduce;
+*/
+      typedef cub::BlockReduce<cu_real_t, 1, cub::BLOCK_REDUCE_RAKING_COMMUTATIVE_ONLY, block_size_reduce> BlockReduce;
       __shared__ typename BlockReduce::TempStorage temp_storage;
       const cu_real_t sum_x = BlockReduce(temp_storage).Sum(field_x);
       __syncthreads();
@@ -330,7 +345,7 @@ __global__ void update_dipolar_fields (
          z_cell_field[i] = prefactor * sum_z;
          z_cell_mu0H_field[i] = prefactor * (sum_z + (-0.5 * self_demag * z_mag[i] * imuB));
       }
-*/
+
 //      printf("%d  %lf  %lf  %lf\n",i,x_cell_field[i],y_cell_field[i],z_cell_field[i]);
       
    } // end lc < n_local_cells
