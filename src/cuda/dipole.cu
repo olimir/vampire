@@ -46,7 +46,7 @@ void update_dipolar_fields ()
 
    // save last time of demag update
    ::dipole::update_time = ::sim::time;
-
+   
    update_cell_magnetizations ();
 
    check_cuda_errors (__FILE__, __LINE__);
@@ -93,8 +93,8 @@ void update_dipolar_fields ()
 
    check_cuda_errors (__FILE__, __LINE__);
    
-   // Transfer cells dipolar fields from gpu to cpu
-   vcuda::transfer_dipole_cells_fields_from_gpu_to_cpu();
+//   // Transfer cells dipolar fields from gpu to cpu
+//   vcuda::transfer_dipole_cells_fields_from_gpu_to_cpu();
 }
 
 void update_cell_magnetizations ()
@@ -276,6 +276,8 @@ __global__ void update_dipolar_fields (
          field_x += (mx_j * d_tensor_xx[k] + my_j * d_tensor_xy[k] + mz_j * d_tensor_xz[k]);
          field_y += (mx_j * d_tensor_xy[k] + my_j * d_tensor_yy[k] + mz_j * d_tensor_yz[k]);
          field_z += (mx_j * d_tensor_xz[k] + my_j * d_tensor_yz[k] + mz_j * d_tensor_zz[k]);
+
+//         printf("   %d %d %d  %lf  %lf  %lf\n",lc,i,j,mx_j * d_tensor_xx[k] + my_j * d_tensor_xy[k] + mz_j * d_tensor_xz[k], mx_j * d_tensor_xy[k] + my_j * d_tensor_yy[k] + mz_j * d_tensor_yz[k], mx_j * d_tensor_xz[k] + my_j * d_tensor_yz[k] + mz_j * d_tensor_zz[k]);
       } // end for loop over n_cells
 
       //reduction across the whole thread-block
@@ -329,6 +331,8 @@ __global__ void update_dipolar_fields (
          z_cell_mu0H_field[i] = prefactor * (sum_z + (-0.5 * self_demag * z_mag[i] * imuB));
       }
 */
+//      printf("%d  %lf  %lf  %lf\n",i,x_cell_field[i],y_cell_field[i],z_cell_field[i]);
+      
    } // end lc < n_local_cells
 }
 
@@ -357,13 +361,14 @@ __global__ void update_atomistic_dipolar_fields (
       x_mu0H_dip_field[i] = x_cell_mu0H_field[cid];
       y_mu0H_dip_field[i] = y_cell_mu0H_field[cid];
       z_mu0H_dip_field[i] = z_cell_mu0H_field[cid];
+      
+//      printf("%d  %lf  %lf  %lf\n",i,x_dip_field[i],y_dip_field[i],z_dip_field[i]);
    }
 }
 
 } // end of internal namespace
 
 void update_dipolar_fields (){
-//    std::cout << "Updating dipolar filed with GPU" << std::endl;
     cu::update_dipolar_fields();
 }
 
